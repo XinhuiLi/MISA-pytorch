@@ -45,17 +45,18 @@ def unconstrained_RQS(inputs, unnormalized_widths, unnormalized_heights,
     outputs[outside_interval_mask] = inputs[outside_interval_mask]
     logabsdet[outside_interval_mask] = 0
 
-    outputs[inside_intvl_mask], logabsdet[inside_intvl_mask] = RQS(
-        inputs=inputs[inside_intvl_mask],
-        unnormalized_widths=unnormalized_widths[inside_intvl_mask, :],
-        unnormalized_heights=unnormalized_heights[inside_intvl_mask, :],
-        unnormalized_derivatives=unnormalized_derivatives[inside_intvl_mask, :],
-        inverse=inverse,
-        left=-tail_bound, right=tail_bound, bottom=-tail_bound, top=tail_bound,
-        min_bin_width=min_bin_width,
-        min_bin_height=min_bin_height,
-        min_derivative=min_derivative
-    )
+    if inside_intvl_mask.any():
+        outputs[inside_intvl_mask], logabsdet[inside_intvl_mask] = RQS(
+            inputs=inputs[inside_intvl_mask],
+            unnormalized_widths=unnormalized_widths[inside_intvl_mask, :],
+            unnormalized_heights=unnormalized_heights[inside_intvl_mask, :],
+            unnormalized_derivatives=unnormalized_derivatives[inside_intvl_mask, :],
+            inverse=inverse,
+            left=-tail_bound, right=tail_bound, bottom=-tail_bound, top=tail_bound,
+            min_bin_width=min_bin_width,
+            min_bin_height=min_bin_height,
+            min_derivative=min_derivative
+        )
     return outputs, logabsdet
 
 
@@ -122,9 +123,16 @@ def RQS(inputs, unnormalized_widths, unnormalized_heights,
         c = - input_delta * (inputs - input_cumheights)
 
         discriminant = b.pow(2) - 4 * a * c
-        assert (discriminant >= 0).all()
+        # assert (discriminant >= 0).all():
+        if (discriminant >= 0).all():
+            root = (2 * c) / (-b - torch.sqrt(discriminant))
+        else:
+            print("\n *** WARNING *** negative numbers in discriminant: "
+                  + str(len(discriminant[discriminant < 0])) + " out of "
+                  + str(len(discriminant)) + "\n")
+            root = (2 * c) / (-b - torch.sqrt(F.relu(discriminant)))
 
-        root = (2 * c) / (-b - torch.sqrt(discriminant))
+        # root = (2 * c) / (-b - torch.sqrt(discriminant))
         outputs = root * input_bin_widths + input_cumwidths
 
         theta_one_minus_theta = root * (1 - root)

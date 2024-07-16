@@ -1,11 +1,12 @@
 import copy
-import wandb
+# import wandb
 import torch
 import torch.nn as nn
 import random
 import numpy as np
 import scipy.io as sio
 from metrics.misi import MISI
+from accelerate import Accelerator
 
 class MISA(nn.Module):
     def __init__(self, weights=list(), index=None, subspace=list(), beta=0.5, eta=1, lam=1, input_dim=list(), output_dim=list(), bias=False, seed=0, device='cpu', model=None, latent_dim=15):
@@ -13,13 +14,13 @@ class MISA(nn.Module):
         super(MISA, self).__init__()
         self.seed = seed
         self.set_seed()
-        # Setting arguments/filters
+        # Set arguments/filters
         assert torch.all(torch.gt(eta, (2-torch.sum(torch.cat(subspace[index], axis=1), axis=1))/2)).item(), "All eta parameters should be lagerer than (2-d)/2."
         assert torch.all(torch.gt(beta, torch.zeros_like(beta))).item(), "All beta parameters should be positive"  # Boolean operations in torch
         assert torch.all(torch.gt(lam, torch.zeros_like(lam))).item(), "All lambda parameters should be positive"
         nu = (2*eta + torch.sum(torch.cat(subspace[index], axis=1), dim=1) - 2)/(2*beta)
         assert torch.all(torch.gt(nu, torch.zeros_like(nu))).item(), "All nu parameter derived from eta and d should be positive."
-        # Defining variables
+        # Define variables
         self.device = device
         self.index = index  # M (slice object)
         self.subspace = subspace  # S
@@ -131,9 +132,14 @@ class MISA(nn.Module):
                     D = torch.linalg.eigvalsh(jacobian_sq)[-ind:] # take the largest ind eigenvalues
                 except:
                     print("Exception: Jacobian matrix is ill-conditioned.")
+                    print(f"Jacobian matrix size: {jacobian_sq.size()}")
+                    print(f"Jacobian matrix: {jacobian_sq}")
+                    _, S, _ = torch.svd_lowrank(jacobian_sq, q=ind)
+                    D = torch.flip(S, [0])
+                    print(f"Jacobian eigenvalues: {D}")
                     # add random noise to avoid ill-conditioned matrix
-                    noise = torch.normal(0, 0.1, size = jacobian_sq.size())
-                    D = torch.linalg.eigvalsh(jacobian_sq + noise)[-ind:]
+                    # noise = torch.normal(0, 0.1, size = jacobian_sq.size())
+                    # D = torch.linalg.eigvalsh(jacobian_sq + noise)[-ind:]
                 jd = torch.sum(torch.log(torch.abs(torch.sqrt(D))))
             return jd
 
@@ -155,7 +161,7 @@ class MISA(nn.Module):
             JD = JD - torch.mean(torch.stack(jd))
             
         J = JE + JF + JC + JD + fc
-        wandb.log({'J': J, 'JE': JE, 'JF': JF, 'JC': JC, 'JD': JD, 'fc': fc})
+        # wandb.log({'J': J, 'JE': JE, 'JF': JF, 'JC': JC, 'JD': JD, 'fc': fc})
         return J
 
     def train_me(self, train_data, n_iter, learning_rate, A=None):
@@ -166,9 +172,13 @@ class MISA(nn.Module):
             for m in range(self.n_modality):
                 params += list(self.input_model[m].parameters()) # remove rows corresponding to u, also look into requires_grad
 
+        # accelerator = Accelerator()
+        # device = accelerator.device
+
         optimizer = torch.optim.Adam(params, lr = learning_rate)
-        # TODO implement a scheduler
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=20, verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=20, verbose=True)
+        # model, optimizer, train_data = accelerator.prepare(model, optimizer, train_data)
+
         training_loss = []
         training_MISI = []        
         trigger_times = 0
@@ -188,17 +198,13 @@ class MISA(nn.Module):
                 loss = self.loss(x=data)
                 loss.backward()
                 optimizer.step()
-                batch_loss.append(loss.detach().cpu().numpy())
+                batch_loss.append(loss)
             training_loss.append(batch_loss)
-            # scheduler.step(np.mean(np.array(batch_loss)))
+            scheduler.step(torch.mean(torch.stack(batch_loss)))
             
             if A is not None:
                 training_MISI.append(MISI([nn.weight.detach().cpu().numpy() for nn in self.net],A,[ss.detach().cpu().numpy() for ss in self.subspace])[0])
                 print('MISA \tloss: {} \tMISI: {}'.format(loss.detach().cpu().numpy(), training_MISI[-1]))
-            else:
-                training_loss_last_iter = training_loss[-1]
-                loss_np = np.mean(training_loss_last_iter)
-                # print('MISA \tloss: {}'.format(loss_np))
             
             # early stop
             # if it == 0: 

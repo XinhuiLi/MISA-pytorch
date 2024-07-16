@@ -1,16 +1,92 @@
-import itertools
 import os
-
-import numpy as np
 import torch
 import torch.nn.functional as F
+import itertools
+import numpy as np
 from sklearn.decomposition import FastICA
 from torch.distributions import Uniform, TransformedDistribution, SigmoidTransform
-
 from losses.fce import ConditionalFCE
 from .nets import MLP
 from .nflib.flows import NormalizingFlowModel, Invertible1x1Conv, ActNorm
 from .nflib.spline_flows import NSF_AR
+
+def ICEBEEM_wrapper_(X, Y, Xv, Yv, Xt, Yt, ebm_hidden_size, n_layer_ebm, n_layer_flow, 
+                     lr_flow, lr_ebm, seed, ckpt_file='icebeem.pt', n_epoch=50, 
+                     test=False, S=None, Sv=None, St=None, Sinit=None):
+    
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    data_dim = X.shape[1]
+
+    model_ebm = MLP(input_size=data_dim, hidden_size=[ebm_hidden_size] * n_layer_ebm,
+                    n_layer=n_layer_ebm, output_size=data_dim, use_bn=True,
+                    activation_function=F.leaky_relu)
+
+    prior = TransformedDistribution(Uniform(torch.zeros(data_dim), torch.ones(data_dim)),
+                                    SigmoidTransform().inv)
+    nfs_flow = NSF_AR
+    flows = [nfs_flow(dim=data_dim, K=8, B=3, hidden_dim=16) for _ in range(n_layer_flow)]
+    convs = [Invertible1x1Conv(dim=data_dim) for _ in flows]
+    norms = [ActNorm(dim=data_dim) for _ in flows]
+    flows = list(itertools.chain(*zip(norms, convs, flows)))
+    # construct the model
+    model_flow = NormalizingFlowModel(prior, flows)
+
+    pretrain_flow = True
+    augment_ebm = True
+
+    # instantiate ebmFCE object
+    fce_ = ConditionalFCE(data=X, segments=Y, source=S, 
+                          data_valid=Xv, segments_valid=Yv, source_valid=Sv, 
+                          data_test=Xt, segments_test=Yt, source_test=St, 
+                          energy_MLP=model_ebm, flow_model=model_flow, verbose=False)
+
+    init_ckpt_file = os.path.splitext(ckpt_file)[0] + '_0' + os.path.splitext(ckpt_file)[1]
+    
+    if not test:
+        if pretrain_flow:
+            # print('pretraining flow model..')
+            fce_.pretrain_flow_model(epochs=1, lr=1e-4)
+            # print('pretraining done.')
+        
+        # pretrain model_ebm with multi-view ICA initial sources to match sources
+        fce_.pretrain_ebm_model(source_init=Sinit)
+
+        # first we pretrain the final layer of EBM model (this is g(y) as it depends on segments)
+        res_dict_pretrain = fce_.train_ebm_fce(epochs=15, augment=augment_ebm, finalLayerOnly=True, cutoff=.5, ckpt_file=ckpt_file)
+
+        # then train full EBM via NCE with flow contrastive noise:
+        res_dict_pretrain = fce_.train_ebm_fce(epochs=n_epoch, augment=augment_ebm, cutoff=.5, useVAT=False, ckpt_file=ckpt_file)
+
+        torch.save({'ebm_mlp': fce_.energy_MLP.state_dict(),
+                    'ebm_finalLayer': fce_.ebm_finalLayer,
+                    'flow': fce_.flow_model.state_dict()}, init_ckpt_file)
+    else:
+        state = torch.load(init_ckpt_file, map_location=fce_.device)
+        fce_.energy_MLP.load_state_dict(state['ebm_mlp'])
+        fce_.ebm_finalLayer = state['ebm_finalLayer']
+        fce_.flow_model.load_stat_dict(state['flow'])
+
+    # iterate between updating noise and tuning the EBM
+    eps = .025
+    for iter_ in range(3):
+        mid_ckpt_file = os.path.splitext(ckpt_file)[0] + '_' + str(iter_ + 1) + os.path.splitext(ckpt_file)[1]
+        if not test:
+            # update flow model:
+            fce_.train_flow_fce(epochs=5, objConstant=-1., cutoff=.5 - eps, lr=lr_flow)
+            # update energy based model:
+            res_dict = fce_.train_ebm_fce(epochs=n_epoch, augment=augment_ebm, cutoff=.5 + eps, lr=lr_ebm, useVAT=False, ckpt_file=ckpt_file)
+
+            torch.save({'ebm_mlp': fce_.energy_MLP.state_dict(),
+                        'ebm_finalLayer': fce_.ebm_finalLayer,
+                        'flow': fce_.flow_model.state_dict()}, mid_ckpt_file)
+        else:
+            state = torch.load(mid_ckpt_file, map_location=fce_.device)
+            fce_.energy_MLP.load_state_dict(state['ebm_mlp'])
+            fce_.ebm_finalLayer = state['ebm_finalLayer']
+            fce_.flow_model.load_stat_dict(state['flow'])
+
+    return res_dict
 
 
 def ICEBEEM_wrapper(X, Y, ebm_hidden_size, n_layer_ebm, n_layer_flow, lr_flow, lr_ebm, seed,

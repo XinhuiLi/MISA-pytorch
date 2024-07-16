@@ -13,10 +13,11 @@ class ConditionalDataset(Dataset):
     used in `models.ivae.ivae_wrapper.IVAE_wrapper()`
     """
 
-    def __init__(self, X, Y, device='cpu', latent_dim=None):
+    def __init__(self, X, Y, device='cpu', S=None, latent_dim=None):
         self.device = device
-        self.x = torch.from_numpy(X)  # .to(device)
-        self.y = torch.from_numpy(Y)  # .to(device)  # if discrete, then this should be one_hot
+        self.x = torch.from_numpy(X).to(device)
+        self.y = torch.from_numpy(Y).to(device)  # if discrete, then this should be one_hot
+        self.s = torch.from_numpy(S).to(device) if S is not None else None
         self.len = self.x.shape[0]
         self.aux_dim = self.y.shape[1]
         self.data_dim = self.x.shape[1]
@@ -29,7 +30,10 @@ class ConditionalDataset(Dataset):
         return self.len
 
     def __getitem__(self, index):
-        return self.x[index], self.y[index]
+        if self.s is not None:
+            return self.x[index], self.y[index], self.s[index]
+        else:
+            return self.x[index], self.y[index]
 
     def get_dims(self):
         return self.data_dim, self.latent_dim, self.aux_dim
@@ -398,7 +402,7 @@ def gen_TCL_data_ortho(Ncomp, Nlayer, Nsegment, NsegmentObs, source='Laplace', N
     return {'source': dat, 'obs': mixedDat, 'labels': labels, 'mixing': mixingList, 'var': modMat}
 
 
-def gen_ivae_data(Ncomp=10, Nlayer=2, Nsegment=20, NsegmentObs=200, Nmodality=2, source='Gaussian', seed=1):
+def gen_diva_data(Ncomp=10, Nlayer=2, Nsegment=20, NsegmentObs=200, Nmodality=2, source='Gaussian', seed=1):
     # Ncomp=10
     # Nlayer=2
     # Nsegment=20
@@ -414,20 +418,18 @@ def gen_ivae_data(Ncomp=10, Nlayer=2, Nsegment=20, NsegmentObs=200, Nmodality=2,
     # check input is correct
     assert NonLin in ['leaky', 'sigmoid']
 
-    # generate non-stationary data:
+    # generate non-stationary data
     Nobs = NsegmentObs * Nsegment  # total number of observations
     labels = np.zeros(Nobs)  # labels for each observation (populate below)
-
-    # generate data, which we will then modulate in a non-stationary manner:
     data_list = []
     mixingList = []
 
-    correlation = np.diag(np.random.uniform(0.7, 0.9, Ncomp))
+    correlation = np.diag(np.random.uniform(0.6, 0.8, Ncomp))
 
     for i in range(Nsegment):
         ic = i % Ncomp
         # generate Multivariate Gaussian data per segment
-        var1 = np.diag(np.random.uniform(0.2, 4, Ncomp)) #std: 0.45-2
+        var1 = np.diag(np.random.uniform(0.2, 4, Ncomp))
         var2 = np.diag(np.random.uniform(0.2, 4, Ncomp))
         # TODO explain this step in paper
         var1[ic, ic] = 8
@@ -444,7 +446,7 @@ def gen_ivae_data(Ncomp=10, Nlayer=2, Nsegment=20, NsegmentObs=200, Nmodality=2,
         #     crosscov = np.sqrt(var)
         # crosscov = correlation * crosscov
 
-        data = np.random.multivariate_normal(np.random.uniform(-3, 3, Nmodality * Ncomp), cov, NsegmentObs) # 200 x 20
+        data = np.random.multivariate_normal(np.random.uniform(-4, 4, Nmodality * Ncomp), cov, NsegmentObs) # 200 x 20
         data_rs_ = data.reshape(NsegmentObs, Nmodality, Ncomp)
         data_rs = np.transpose(data_rs_, (0, 2, 1))
         data_list.append(data_rs)
@@ -483,8 +485,8 @@ def generate_synthetic_data(data_dim, data_segments, n_obs_seg, n_layer, simulat
         baseCov = random_correlation.rvs(baseEvals)
         dat_all = gen_IMCA_data(Ncomp=data_dim, Nsegment=data_segments, Nlayer=n_layer, NsegmentObs=n_obs_seg,
                                 NonLin='leaky', negSlope=.2, BaseCovariance=baseCov, seed=seed)
-    elif simulationMethod.lower() == 'ivae':
-        dat_all = gen_ivae_data(Ncomp=data_dim, Nsegment=data_segments, Nlayer=n_layer, NsegmentObs=n_obs_seg, seed=seed)
+    elif simulationMethod.lower() == 'diva':
+        dat_all = gen_diva_data(Ncomp=data_dim, Nsegment=data_segments, Nlayer=n_layer, NsegmentObs=n_obs_seg, seed=seed)
     else:
         raise ValueError('invalid simulation method: {}'.format(simulationMethod))
     x = dat_all['obs']

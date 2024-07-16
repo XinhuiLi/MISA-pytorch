@@ -6,7 +6,7 @@ import torch
 import numpy as np
 import yaml
 from runners.misa_runner import run_misa
-from runners.deepmisa_runner import run_diva, run_ivae, run_jivae, run_givae, run_misa_ivae
+from runners.deepmisa_runner import run_diva, run_ivae, run_jivae, run_givae, run_deepmisa, run_icebeem, run_mvica
 
 def parse_sim():
     
@@ -20,12 +20,10 @@ def parse_sim():
     required.add_argument('-c', '--config', type=str, default='sim-siva.yaml', help='Path to the config file')
     required.add_argument('-r', '--run', type=str, default='run/', help='Path for saving running related data.')
     required.add_argument('-t', '--test', action='store_true', help='Whether to evaluate the models from checkpoints')
-    
-    # required.add_argument('--dataset', type=str, default='TCL', help='Dataset to run experiments. Should be TCL or IMCA')
-    required.add_argument('-m', '--method', type=str, default='icebeem',
-                        help='Method to employ. Should be TCL, iVAE or ICE-BeeM')
+    required.add_argument('-m', '--method', type=str, default='diva', help='Method to employ. Should be DIVA, iVAE, jiVAE, giVAE, MISA, ICEBEEM, or MVICA')
 
     optional.add_argument('-a', '--a_exist', action='store_true', help='Whether the dataset includes ground truth A matrix')
+    optional.add_argument('-l', '--n_layer', type=int, default=2, help='Number of nonlinear mixing layers')
     optional.add_argument('--n_epoch', type=int, default=2000, help='Number of epochs')
     optional.add_argument('--ivae_lr', type=float, default=0.001, help='iVAE learning rate')
     optional.add_argument('--ivae_max_iter_per_epoch', type=int, default=10, help='Number of maximum iterations per epoch')
@@ -63,7 +61,6 @@ def dict2namespace(config):
     return namespace
 
 
-
 if __name__ == '__main__':
     args = parse_sim()
     print('\n\n\nRunning {} experiments'.format(args.data))
@@ -85,7 +82,11 @@ if __name__ == '__main__':
         elif args.method.lower() == 'givae':
             r = run_givae(args, new_config)
         elif args.method.lower() == 'misa':
-            r = run_misa_ivae(args, new_config)
+            r = run_deepmisa(args, new_config)
+        elif args.method.lower() == 'icebeem':
+            r = run_icebeem(args, new_config)
+        elif args.method.lower() == 'mvica':
+            r = run_mvica(args, new_config)
         else:
             r = run_misa(args, new_config)
             for k, v in r.items():
@@ -102,8 +103,12 @@ if __name__ == '__main__':
         # runner loops over many seeds, so the saved file contains results from multiple runs
         if args.test:
             fname = os.path.join(args.run, 'res_' + args.filename.split('.')[0] + '_' + args.weights + '_test.p')
-        elif args.method.lower() in ['ivae', 'jivae', 'givae', 'icebeem', 'icebeem_concat', 'misa', 'diva']:
-            fname = os.path.join(args.run, f'res_{args.method.lower()}_source{args.n_source}_obs{args.n_obs_per_seg}_seg{args.n_segment}_epoch{args.n_epoch}_bsmisa{args.misa_batch_size}_bsivae{args.ivae_batch_size}_lrivae{args.ivae_lr}_maxiter{args.ivae_max_iter_per_epoch}_seed{args.seed}.p')
+        elif args.method.lower() in ['ivae', 'jivae', 'givae', 'misa', 'diva']:
+            fname = os.path.join(args.run, f'res_{args.method.lower()}_layer{args.n_layer}_source{args.n_source}_obs{args.n_obs_per_seg}_seg{args.n_segment}_epoch{args.n_epoch}_bsmisa{args.misa_batch_size}_bsivae{args.ivae_batch_size}_lrivae{args.ivae_lr}_maxiter{args.ivae_max_iter_per_epoch}_seed{args.seed}.p')
+        elif args.method.lower() == 'icebeem':
+            fname = os.path.join(args.run, f'res_{args.method.lower()}_layer{args.n_layer}_source{args.n_source}_obs{args.n_obs_per_seg}_seg{args.n_segment}_epoch{args.n_epoch}_layerflow{new_config.icebeem.n_layer_flow}_lrebm{new_config.icebeem.lr_ebm}_lrflow{new_config.icebeem.lr_flow}_seed{args.seed}.p')
+        elif args.method.lower() == 'mvica':
+            fname = os.path.join(args.run, f'res_{args.method.lower()}_layer{args.n_layer}_source{args.n_source}_obs{args.n_obs_per_seg}_seg{args.n_segment}_seed{args.seed}.p')
         else:
             fname = os.path.join(args.run, 'res_' + args.filename.split('.')[0] + '_' + args.weights + '.p')
 

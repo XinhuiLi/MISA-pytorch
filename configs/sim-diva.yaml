@@ -1,32 +1,36 @@
-dataset: "ivae"
+dataset: "diva"
 subspace: "iva"
 method: "diva"
 experiment: "sim"
 cuda: True
 
 n_epoch: 200
-n_modality: 2
 
 # data
-eta: [1]
-beta: [0.5]
-lam: [1]
+n_modality: 2
 latent_dim: 5
-n_layer: [2]
+n_layer: 4
 n_segment: 14
-n_obs_per_seg: [200]
+n_obs_per_seg: 200
 data_seed: 1
 
 # model
-misa:
-  lr: 0.001 
-  n_run: 1
-  batch_size: 200
+init_method: "mvica" # "ivae" or "mvica"
 
+misa:
+  eta: [1]
+  beta: [0.5]
+  lam: [1]
+  fix_var: False
+  lr: 0.001
+  batch_size: 200
+  n_run: 1
+  
 ivae:
   lr: 0.01
   batch_size: 140
   max_iter_per_epoch: 10
+  hidden_dim: []
 
 icebeem:
   lr_flow: 0.00001

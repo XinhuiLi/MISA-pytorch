@@ -1,5 +1,5 @@
 import copy
-import wandb
+# import wandb
 import torch
 import torch.nn as nn
 import random
@@ -158,7 +158,7 @@ class MISA(nn.Module):
             JD = JD - torch.mean(torch.stack(jd))
             
         J = JE + JF + JC + JD + fc
-        # wandb.log({'J': J, 'JE': JE, 'JF': JF, 'JC': JC, 'JD': JD, 'fc': fc})
+        # # wandb.log({'J': J, 'JE': JE, 'JF': JF, 'JC': JC, 'JD': JD, 'fc': fc})
         return J
 
     def train_me(self, train_data, n_iter, learning_rate, A=None):
@@ -200,7 +200,7 @@ class MISA(nn.Module):
             else:
                 loss_np = loss.detach().cpu().numpy()
                 print('MISA \tloss: {}'.format(loss_np))
-                # wandb.log({'MISA loss': loss_np})
+                # # wandb.log({'MISA loss': loss_np})
             
             # early stop
             # if it == 0: 
