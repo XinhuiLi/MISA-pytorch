@@ -63,7 +63,7 @@ class Dataset(data.Dataset):
         else:
             # .mat file
             for i in range(self.num_modal):
-                data_out.append(torch.tensor(self.mat_data[i][index,:], dtype=torch.float32, device=self.device))
+                data_out.append(torch.tensor(self.mat_data[i][index,:], dtype=torch.float32)) #device=self.device
 
         return data_out
 

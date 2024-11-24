@@ -6,7 +6,7 @@ import random
 import numpy as np
 import scipy.io as sio
 from metrics.misi import MISI
-from accelerate import Accelerator
+# from accelerate import Accelerator
 
 class MISA(nn.Module):
     def __init__(self, weights=list(), index=None, subspace=list(), beta=0.5, eta=1, lam=1, input_dim=list(), output_dim=list(), bias=False, seed=0, device='cpu', model=None, latent_dim=15):
@@ -52,7 +52,7 @@ class MISA(nn.Module):
         self.output = list()
         self.d = torch.sum(torch.cat(self.subspace[self.index], axis=1), axis=1)
         self.nes = torch.ne(self.d, torch.zeros_like(self.d, device=device))
-        self.a = (torch.pow(self.lam, (-1/self.beta))) * torch.lgamma(self.nu + 1 / self.beta) / (self.d * torch.lgamma(self.nu))
+        self.a = (torch.pow(self.lam, (-1/self.beta))) * torch.exp(torch.lgamma(self.nu + 1 / self.beta)) / (self.d * torch.exp(torch.lgamma(self.nu)))
         self.d_k = [(torch.sum(self.subspace[i].int(), axis=1)).int() for i in range(len(self.subspace))]
         self.K = self.nes.sum()
         if weights == "mgpca":
@@ -87,15 +87,16 @@ class MISA(nn.Module):
                 z.append(encoder_params[0]) # mean
             self.output = z
 
-    def loss(self, x=None, approximate_jacobian=False):
+    def loss(self, x=None, approximate_jacobian=False, scale_control=True):
         JE = 0
         JF = 0
         JC = 0
         JD = 0
         fc = 0
         self.nes
+        N = self.output[0].shape[0]
         for kk in list(torch.where(self.nes)[0]):
-            y_sub = torch.zeros(self.output[0].shape[0], self.d[kk].int(), device=self.device)
+            y_sub = torch.zeros(N, self.d[kk].int(), device=self.device)
             tot = 0
             for m in range(self.n_modality):
                 ix = slice(tot, tot + self.d_k[m][kk].int())
@@ -103,21 +104,34 @@ class MISA(nn.Module):
                     y_sub[:, ix] = self.output[m][:,self.subspace[m][kk, :] == 1]
                 tot = tot + self.d_k[m][kk].int()
             yyT = y_sub.T @ y_sub
-            g_k = torch.pow(torch.diag(yyT), -.5)
-            g2_k = torch.pow(torch.diag(yyT), -1)
-            g_kInv = torch.pow(torch.diag(yyT), .5)
-            ybar_sub = g_kInv * y_sub
-            yyTInv = torch.linalg.inv(yyT)
-            A = ybar_sub @ yyTInv
-            z_k = torch.sum(ybar_sub * A, axis=1)
-            z_k_beta = torch.pow(z_k, self.beta[kk])
-            JE = JE + self.lam[kk] * torch.mean(z_k_beta)
-            if self.eta[kk] != 1:
-                JF = JF + (1-self.eta[kk]) * torch.mean(torch.log(z_k))
-            JC = JC + torch.sum(torch.log(torch.linalg.eigvalsh(g_k[:, None] * (yyT * g_k[None, :]))))
+            if scale_control:
+                g_k = torch.pow(torch.diag(yyT), -.5)
+                g2_k = torch.pow(torch.diag(yyT), -1)
+                g_kInv = torch.pow(torch.diag(yyT), .5)
+                ybar_sub = g_kInv * y_sub
+                yyTInv = torch.linalg.inv(yyT)
+                A = ybar_sub @ yyTInv
+                z_k = torch.sum(ybar_sub * A, axis=1)
+                z_k_beta = torch.pow(z_k, self.beta[kk])
+                JE = JE + self.lam[kk] * torch.mean(z_k_beta)
+                if self.eta[kk] != 1:
+                    JF = JF + (1-self.eta[kk]) * torch.mean(torch.log(z_k))
+                JC = JC + torch.sum(torch.log(torch.linalg.eigvalsh(g_k[:, None] * (yyT * g_k[None, :]))))
+            else:
+                D, t1 = torch.linalg.eigh(yyT)
+                A = y_sub @ ((t1 * (1./D)) @ t1.T)
+                z_k = torch.sum(y_sub * A, dim=1)
+                z_k_beta = z_k ** self.beta[kk]
+                JE += (self.lam[kk] * (((N - 1) * self.a[kk]) ** self.beta[kk]) / N) * torch.sum(z_k_beta)
+                if self.eta[kk] != 1:
+                    JF += (1 - self.eta[kk]) * (torch.log(N - 1) + torch.log(self.a[kk])) + ((1 - self.eta[kk]) / N) * torch.sum(torch.log(z_k))
+                JC += torch.sum(torch.log(D))
         JC = JC / 2
-        fc = 0.5 * torch.log(torch.tensor(torch.pi)) * torch.sum(self.d) + torch.sum(torch.lgamma(self.nu)) - torch.sum(torch.lgamma(0.5 * self.d)) - torch.sum(self.nu * torch.log(self.lam)) - torch.sum(torch.log(self.beta))
-        
+        if scale_control:
+            fc = 0.5 * torch.log(torch.tensor(torch.pi)) * torch.sum(self.d) + torch.sum(torch.lgamma(self.nu)) - torch.sum(torch.lgamma(0.5 * self.d)) - torch.sum(self.nu * torch.log(self.lam)) - torch.sum(torch.log(self.beta))
+        else:
+            fc = 0.5 * torch.log(torch.tensor(torch.pi)) * torch.sum(self.d[self.nes]) - 0.5 * torch.sum((torch.log(torch.tensor((N - 1))) + torch.log(self.a[self.nes])) * self.d[self.nes]) + torch.sum(torch.lgamma(self.nu[self.nes])) - torch.sum(torch.lgamma(0.5 * self.d[self.nes])) - torch.sum(self.nu[self.nes] * torch.log(self.lam[self.nes])) - torch.sum(torch.log(self.beta[self.nes]))
+
         def compute_JD(jacobian):
             jacobian = jacobian.squeeze()
             cc,rr = jacobian.size()
@@ -161,10 +175,11 @@ class MISA(nn.Module):
             JD = JD - torch.mean(torch.stack(jd))
             
         J = JE + JF + JC + JD + fc
+        # print(f"J: {J:.3f}, JE: {JE:.3f}, JF: {JF:.3f}, JC: {JC:.3f}, JD: {JD:.3f}, fc: {fc:.3f}")
         # wandb.log({'J': J, 'JE': JE, 'JF': JF, 'JC': JC, 'JD': JD, 'fc': fc})
         return J
 
-    def train_me(self, train_data, n_iter, learning_rate, A=None):
+    def train_me(self, train_data, n_iter, learning_rate, A=None, scale_control=True):
         if self.input_model is None:
             params = self.parameters()
         else:
@@ -188,34 +203,35 @@ class MISA(nn.Module):
         
         for it in range(n_iter):
             batch_loss = []
-            for i, data in enumerate(train_data, 0):
+            for i, data in enumerate(train_data):
                 # print("data shape", data[0].shape)
                 # if the number of samples in one batch is less than the number of sources or modalities, skip this batch
                 if data[0].shape[0] <= max(self.latent_dim, self.n_modality)*2:
                     continue
+                data = [d.to(self.device) for d in data]
                 optimizer.zero_grad()
                 self.forward(data)
-                loss = self.loss(x=data)
-                loss.backward()
+                l = self.loss(x=data, scale_control=scale_control)
+                l.backward()
                 optimizer.step()
-                batch_loss.append(loss)
+                batch_loss.append(l)
             training_loss.append(batch_loss)
             scheduler.step(torch.mean(torch.stack(batch_loss)))
             
             if A is not None:
                 training_MISI.append(MISI([nn.weight.detach().cpu().numpy() for nn in self.net],A,[ss.detach().cpu().numpy() for ss in self.subspace])[0])
-                print('MISA \tloss: {} \tMISI: {}'.format(loss.detach().cpu().numpy(), training_MISI[-1]))
+                print('MISA \tloss: {} \tMISI: {}'.format(l.detach().cpu().numpy(), training_MISI[-1]))
             
             # early stop
             # if it == 0: 
             #     nn_weight_current = [nn.weight.detach().cpu().numpy() for nn in self.net]
             #     nn_weight_previous = copy.deepcopy(nn_weight_current)
-            #     loss_current = loss.detach().cpu().numpy()
+            #     loss_current = l.detach().cpu().numpy()
             #     loss_previous = loss_current
             # else:
             #     nn_weight_current = [nn.weight.detach().cpu().numpy() for nn in self.net]
             #     nn_weight_diff = np.max(np.array([np.max(np.abs(nn_weight_previous[i]-c)) for i, c in enumerate(nn_weight_current)]))
-            #     loss_current = loss.detach().cpu().numpy()
+            #     loss_current = l.detach().cpu().numpy()
             #     loss_diff = np.abs(loss_current-loss_previous)
             #     if nn_weight_diff < nn_weight_threshold or loss_diff < loss_threshold:
             #         trigger_times += 1
@@ -227,15 +243,16 @@ class MISA(nn.Module):
             #         trigger_times = 0
             #     nn_weight_previous = copy.deepcopy(nn_weight_current)
             #     loss_previous = loss_current
-
+        
         return training_loss, training_MISI, optimizer
 
     def predict(self, test_data):
         test_loss = []
         for i, data in enumerate(test_data, 0):
+            data = [d.to(self.device) for d in data]
             self.forward(data)
-            loss = self.loss(x=data)
-            test_loss.append(loss.detach().cpu().numpy())
+            l = self.loss(x=data)
+            test_loss.append(l.detach().cpu().numpy())
         return test_loss
 
 if __name__ == "__main__":
@@ -255,5 +272,5 @@ if __name__ == "__main__":
     model.cuda()
     model.forward(x)
     print(model.output)
-    loss = model.loss()
-    print(loss)
+    l = model.loss()
+    print(l)

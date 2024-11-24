@@ -1,5 +1,11 @@
 torch
-torchvision
 scipy
 numpy
 nibabel
+pyyaml
+mat73
+pandas
+scikit-learn
+seaborn
+fastsrm
+python-picard

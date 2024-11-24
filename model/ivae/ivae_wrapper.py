@@ -30,8 +30,8 @@ def IVAE_wrapper(data_loader, batch_size=256, max_iter=7e4, n_layer=3, lr=1e-3, 
         for it in range(max_iter):
             elbo_train = 0
             for _, (x, u) in enumerate(data_loader):
-                optimizer.zero_grad()
                 x, u = x.to(device), u.to(device)
+                optimizer.zero_grad()
                 elbo, z_est = model.elbo(x, u)
                 elbo.mul(-1).backward()
                 # accelerator.backward(elbo.mul(-1))
@@ -52,25 +52,26 @@ def IVAE_wrapper(data_loader, batch_size=256, max_iter=7e4, n_layer=3, lr=1e-3, 
                 # wandb.log({'iVAE training loss': elbo_train, 'iVAE validation loss': elbo_valid})
             else:
                 loss = elbo_train
-                print(f'iVAE training loss: {elbo_train:.3f}')
+                # print(f'iVAE training loss: {elbo_train:.3f}')
                 # wandb.log({'iVAE training loss': elbo_train})
         # save model checkpoint after training
         torch.save(model.state_dict(), ckpt_file)
     else:
-        model_params = torch.load(ckpt_file, map_location=device)
+        model_params = torch.load(ckpt_file, map_location=device, weights_only=False)
+        prefix = '' #'_orig_mod.' # set prefix to '_orig_mod.' when loading the model trained with torch.compile()
         with torch.no_grad():
             for l in range(n_layer):
-                model.logl.fc[l].weight.copy_(model_params[f'logl.fc.{l}.weight'])
-                model.logl.fc[l].bias.copy_(model_params[f'logl.fc.{l}.bias'])
-                model.f.fc[l].weight.copy_(model_params[f'f.fc.{l}.weight'])
-                model.f.fc[l].bias.copy_(model_params[f'f.fc.{l}.bias'])
-                model.g.fc[l].weight.copy_(model_params[f'g.fc.{l}.weight'])
-                model.g.fc[l].bias.copy_(model_params[f'g.fc.{l}.bias'])
-                model.logv.fc[l].weight.copy_(model_params[f'logv.fc.{l}.weight'])
-                model.logv.fc[l].bias.copy_(model_params[f'logv.fc.{l}.bias'])
+                model.logl.fc[l].weight.copy_(model_params[f'{prefix}logl.fc.{l}.weight'])
+                model.logl.fc[l].bias.copy_(model_params[f'{prefix}logl.fc.{l}.bias'])
+                model.f.fc[l].weight.copy_(model_params[f'{prefix}f.fc.{l}.weight'])
+                model.f.fc[l].bias.copy_(model_params[f'{prefix}f.fc.{l}.bias'])
+                model.g.fc[l].weight.copy_(model_params[f'{prefix}g.fc.{l}.weight'])
+                model.g.fc[l].bias.copy_(model_params[f'{prefix}g.fc.{l}.bias'])
+                model.logv.fc[l].weight.copy_(model_params[f'{prefix}logv.fc.{l}.weight'])
+                model.logv.fc[l].bias.copy_(model_params[f'{prefix}logv.fc.{l}.bias'])
         elbo_test = 0
         for _, (x, u) in enumerate(data_loader):
-            # x, u = x.to(device), u.to(device)
+            x, u = x.to(device), u.to(device)
             elbo, z_est = model.elbo(x, u)
             elbo_test += -elbo.item()
         elbo_test /= len(data_loader)
@@ -101,7 +102,7 @@ def IVAE_init_wrapper(X, U, S, model, batch_size=256, mi_ivae=1000, cuda=True):
         loss_total = 0
         for _, (x, u, s) in enumerate(data_loader):
             optimizer_s.zero_grad()
-            # x, u, s = x.to(device), u.to(device), s.to(device)
+            x, u, s = x.to(device), u.to(device), s.to(device)
             _, _, rs, _ = model.forward(x, u)
             loss_batch = loss(rs, s) / norm_const_s
             loss_batch.backward()
@@ -109,7 +110,8 @@ def IVAE_init_wrapper(X, U, S, model, batch_size=256, mi_ivae=1000, cuda=True):
             loss_total += loss_batch.item()
         loss_total /= len(data_loader)
         scheduler_s.step(loss_total)
-        print(f'iVAE initialization - source reconstruction - iteration {it}; training loss: {loss_total:.3f}')
+        if it % 50 == 0:
+            print(f'iVAE initialization - source reconstruction - iteration {it}; training loss: {loss_total:.3f}')
         if early_stopper.early_stop(loss_total):
             print(f'Early stopping triggered!')
             break
@@ -128,7 +130,7 @@ def IVAE_init_wrapper(X, U, S, model, batch_size=256, mi_ivae=1000, cuda=True):
         loss_total = 0
         for _, (x, u, s) in enumerate(data_loader):
             optimizer_x.zero_grad()
-            # x, u, s = x.to(device), u.to(device), s.to(device)
+            x, u, s = x.to(device), u.to(device), s.to(device)
             (rx, _), _, _, _ = model.forward(x, u)
             loss_batch = loss(rx, x) / norm_const_x
             loss_batch.backward()
@@ -136,7 +138,8 @@ def IVAE_init_wrapper(X, U, S, model, batch_size=256, mi_ivae=1000, cuda=True):
             loss_total += loss_batch.item()
         loss_total /= len(data_loader)
         scheduler_x.step(loss_total)
-        print(f'iVAE initialization - data reconstruction - iteration {it}; iVAE training loss: {loss_total:.3f}')
+        if it % 50 == 0:
+            print(f'iVAE initialization - data reconstruction - iteration {it}; iVAE training loss: {loss_total:.3f}')
         if early_stopper.early_stop(loss_total):
             print(f'Early stopping triggered!')
             break

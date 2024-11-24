@@ -15,10 +15,10 @@ from metrics.mmse import MMSE
 from model.ivae.ivae_core import iVAE
 from model.ivae.ivae_wrapper import IVAE_wrapper, IVAE_init_wrapper
 from model.MISAK import MISA
-# from model.MISAKinit import MISA
 from model.misa_wrapper import MISA_wrapper_
 from model.icebeem_wrapper import ICEBEEM_wrapper_
 from model.multiviewica import multiviewica
+from model.mgpca import run_mgpca
 from data.utils import to_one_hot
 
 
@@ -66,7 +66,7 @@ def split_img_data(data):
     return x_train, y_train, u_train, x_valid, y_valid, u_valid, x_test, y_test, u_test
 
 
-def run_diva(args, config, method="diva"):
+def run_deepiva(args, config, method="diva"):
     # wandb.init(project=method, entity="deepmisa")
     start = time.time()
     seed = args.seed
@@ -78,8 +78,8 @@ def run_diva(args, config, method="diva"):
     dataset = config.dataset
     n_layer = args.n_layer if args.n_layer else config.n_layer
     n_epoch = args.n_epoch if args.n_epoch else config.n_epoch
-    cuda = config.cuda
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    cuda = torch.cuda.is_available()
+    device = torch.device('cuda') if cuda else torch.device('cpu')
 
     # iVAE config
     latent_dim = args.n_source if args.n_source else config.latent_dim
@@ -164,7 +164,7 @@ def run_diva(args, config, method="diva"):
     data_dim = x_train.shape[1]
     aux_dim = y_train.shape[1]
 
-    loader_params = {'num_workers': 4, 'pin_memory': True} if cuda else {}
+    loader_params = {'num_workers': 5, 'pin_memory': True, 'pin_memory_device': 'cuda'} if cuda else {}
 
     # create a list of iVAE modality-specific data loaders
     dset_list_train, dset_list_valid, dset_list_test = [], [], []
@@ -225,6 +225,9 @@ def run_diva(args, config, method="diva"):
         sdl_list_valid.append(data_loader_valid)
         sdl_list_test.append(data_loader_test)
 
+    if init_method == 'mgpca':
+        s_init_mgpca, _, _ = run_mgpca([x_train[:,:,m].T for m in range(n_modality)], latent_dim, 'WT')
+
     # initiate iVAE model for each modality
     for m in range(n_modality):
         ckpt_file = os.path.join(args.run, 'checkpoints', f'{experiment}_{method}_ivae_layer{n_layer}_source{latent_dim}_obs{n_obs_per_seg}_seg{n_segment}_seed{seed}_modality{m+1}_epoch{n_epoch}_maxiter{mi_ivae}_lrivae{lr_ivae}.pt')
@@ -244,12 +247,16 @@ def run_diva(args, config, method="diva"):
             # initialize iVAE weights with multi-view ICA initial sources from PCA and perm ICA
             fname = os.path.join(args.run, f"res_mvica_source{latent_dim}_obs{n_obs_per_seg}_seg{n_segment}_seed{seed}.p")
             if os.path.exists(fname):
-                print(f'Loading multi-view ICA weight {fname}')
+                print(f'Loading multi-view ICA weights {fname}')
                 res = pickle.load(open(fname, 'rb'))
                 s_init_mvica = res['initial_recovered_source_per_modality'][m]['train']
-                model_ivae = IVAE_init_wrapper(X=x_train[:,:,m], U=y_train, S=s_init_mvica, model=model_ivae, batch_size=batch_size_ivae, mi_ivae=1000)
+                print('Initializing iVAE using multi-view ICA weights')
+                model_ivae = IVAE_init_wrapper(X=x_train[:,:,m], U=y_train, S=s_init_mvica, model=model_ivae, batch_size=batch_size_ivae)
             else:
-                print(f'File {fname} not found. Initialize iVAE using random weights.')
+                print(f'File {fname} not found. Initializing iVAE using random weights.')
+        elif init_method == 'mgpca':
+            print('Initializing iVAE using MGPCA weights')
+            model_ivae = IVAE_init_wrapper(X=x_train[:,:,m], U=y_train, S=s_init_mgpca[m], model=model_ivae, batch_size=batch_size_ivae, mi_ivae=2000)
 
         model_ivae, _ = IVAE_wrapper(data_loader=mdl_list_train[m], batch_size=batch_size_ivae, 
                                     n_layer=n_layer, cuda=cuda, max_iter=mi_ivae, lr=lr_ivae,
@@ -257,11 +264,13 @@ def run_diva(args, config, method="diva"):
                                     data_loader_valid=mdl_list_valid[m])
         
         X_train, U_train = dset_list_train[m].x, dset_list_train[m].y
+        # X_train, U_train = X_train.to(device), U_train.to(device)
         _, _, rs_ivae_train, _ = model_ivae(X_train, U_train)
         X_valid, U_valid = dset_list_valid[m].x, dset_list_valid[m].y
+        # X_valid, U_valid = X_valid.to(device), U_valid.to(device)
         _, _, rs_ivae_valid, _ = model_ivae(X_valid, U_valid)
 
-        rs_ivae_train = rs_ivae_train.detach().numpy()
+        rs_ivae_train = rs_ivae_train.detach().cpu().numpy()
         fname = os.path.join(args.run, f'src_ivae_m{m+1}_{experiment}_{method}_layer{n_layer}_source{latent_dim}_obs{n_obs_per_seg}_seg{n_segment}_bsmisa{batch_size_misa}_bsivae{batch_size_ivae}_lrivae{lr_ivae}_maxiter{mi_ivae}_seed{seed}.p')
         pickle.dump(rs_ivae_train, open(fname, "wb"))
 
@@ -293,19 +302,19 @@ def run_diva(args, config, method="diva"):
         # remove the mean of segment because MISA loss assumes zero mean
         # randomize segment order
         for it in range(mi_misa):
-            for seg in segment_shuffled:
+            for ind_seg, seg in enumerate(segment_shuffled):
+                if ind_seg == 0:
+                    scale_control = True
+                else:
+                    scale_control = False
                 model_misa, [rs_misa_train, rs_misa_valid], [loss_misa['train'][e,seg], loss_misa['valid'][e,seg]], res_misa_dict = \
-                    MISA_wrapper_(data_loader=sdl_list_train[seg],
-                                test_data_loader=sdl_list_valid[seg],
-                                epochs=1,
-                                lr=lr_misa,
-                                device=device,
-                                ckpt_file=ckpt_file_misa,
-                                model_MISA=model_misa)
+                    MISA_wrapper_(data_loader=sdl_list_train[seg], test_data_loader=sdl_list_valid[seg],
+                                  epochs=1, lr=lr_misa, device=device, ckpt_file=ckpt_file_misa,
+                                  model_MISA=model_misa, scale_control=scale_control)
                 
                 _, rs_misa_test, loss_misa['test'][e,seg], _ = \
-                    MISA_wrapper_(test=True, data_loader=sdl_list_test[seg], device=device, 
-                                ckpt_file=ckpt_file_misa, model_MISA=model_misa)
+                    MISA_wrapper_(test=True, data_loader=sdl_list_test[seg], device=device, ckpt_file=ckpt_file_misa, 
+                                  model_MISA=model_misa, scale_control=scale_control)
         
         if e % epoch_interval == 0:
             for m in range(n_modality):
@@ -328,10 +337,13 @@ def run_diva(args, config, method="diva"):
                             model=model_misa.input_model[m])
             
             X_train, U_train = dset_list_train[m].x, dset_list_train[m].y
+            # X_train, U_train = X_train.to(device), U_train.to(device)
             _, _, rs_ivae_train, _ = model_misa.input_model[m](X_train, U_train)
             X_valid, U_valid = dset_list_valid[m].x, dset_list_valid[m].y
+            # X_valid, U_valid = X_valid.to(device), U_valid.to(device)
             _, _, rs_ivae_valid, _ = model_misa.input_model[m](X_valid, U_valid)
             X_test, U_test = dset_list_test[m].x, dset_list_test[m].y
+            # X_test, U_test = X_test.to(device), U_test.to(device)
             _, _, rs_ivae_test, _ = model_misa.input_model[m](X_test, U_test)
             
             model_misa.input_model[m].set_aux(False)
@@ -339,9 +351,9 @@ def run_diva(args, config, method="diva"):
 
             # store test results every epoch_interval epochs
             if e % epoch_interval == 0:
-                rs_ivae_train = rs_ivae_train.detach().numpy()
-                rs_ivae_valid = rs_ivae_valid.detach().numpy()
-                rs_ivae_test = rs_ivae_test.detach().numpy()
+                rs_ivae_train = rs_ivae_train.detach().cpu().numpy()
+                rs_ivae_valid = rs_ivae_valid.detach().cpu().numpy()
+                rs_ivae_test = rs_ivae_test.detach().cpu().numpy()
                 res_recovered_source[e].append({'train':rs_ivae_train, 'valid':rs_ivae_valid, 'test':rs_ivae_test})
                 
                 if experiment == 'sim':
@@ -371,7 +383,7 @@ def run_diva(args, config, method="diva"):
     
     end = time.time()
     t = (end - start) / 60
-    print(f"Total time: {t} minutes")
+    print(f"Total time: {t:.3f} minutes")
     
     # prepare output
     Results = {
@@ -390,6 +402,7 @@ def run_diva(args, config, method="diva"):
 
 def run_ivae(args, config, method="ivae"):
     # wandb.init(project=method, entity="deepmisa")
+    start = time.time()
 
     seed = args.seed
     data_seed = config.data_seed
@@ -399,8 +412,8 @@ def run_ivae(args, config, method="ivae"):
     dataset = config.dataset
     n_layer = args.n_layer if args.n_layer else config.n_layer
     n_epoch = args.n_epoch if args.n_epoch else config.n_epoch
-    cuda = config.cuda
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    cuda = torch.cuda.is_available()
+    device = torch.device('cuda') if cuda else torch.device('cpu')
     
     # iVAE config
     latent_dim = args.n_source if args.n_source else config.latent_dim
@@ -442,7 +455,7 @@ def run_ivae(args, config, method="ivae"):
     data_dim = x_train.shape[1]
     aux_dim = y_train.shape[1]
 
-    loader_params = {'num_workers': 4, 'pin_memory': True} if cuda else {}
+    loader_params = {'num_workers': 5, 'pin_memory': True, 'pin_memory_device': 'cuda'} if cuda else {}
 
     # create a list of iVAE modality-specific data loaders
     dset_list_train, dset_list_valid, dset_list_test = [], [], []
@@ -463,6 +476,9 @@ def run_ivae(args, config, method="ivae"):
         mdl_list_valid.append(data_loader_valid)
         mdl_list_test.append(data_loader_test)
 
+    if init_method == 'mgpca':
+        s_init_mgpca, _, _ = run_mgpca([x_train[:,:,m].T for m in range(n_modality)], latent_dim, 'WT')
+
     for m in range(n_modality):
         ckpt_file = os.path.join(args.run, 'checkpoints', f'{experiment}_{method}_layer{n_layer}_source{latent_dim}_obs{n_obs_per_seg}_seg{n_segment}_seed{seed}_modality{m+1}_epoch{n_epoch}_maxiter{mi_ivae}_lrivae{lr_ivae}.pt')
         
@@ -475,17 +491,21 @@ def run_ivae(args, config, method="ivae"):
                         hidden_dim=hidden_dim,
                         method=method,
                         seed=seed)
-        
+        # model_ivae = torch.compile(model_ivae)
+
         if init_method == 'mvica':
             # initialize iVAE weights with multi-view ICA initial sources from PCA and perm ICA
             fname = os.path.join(args.run, f"res_mvica_source{latent_dim}_obs{n_obs_per_seg}_seg{n_segment}_seed{seed}.p")
             if os.path.exists(fname):
-                print(f'Loading multi-view ICA weight {fname}')
+                print(f'Loading multi-view ICA weights {fname}')
                 res = pickle.load(open(fname, 'rb'))
                 s_init_mvica = res['initial_recovered_source_per_modality'][m]['train']
                 model_ivae = IVAE_init_wrapper(X=x_train[:,:,m], U=y_train, S=s_init_mvica, model=model_ivae, batch_size=batch_size_ivae)
             else:
                 print(f'File {fname} not found. Initialize iVAE using random weights.')
+        elif init_method == 'mgpca':
+            print('Initializing iVAE using MGPCA weights')
+            model_ivae = IVAE_init_wrapper(X=x_train[:,:,m], U=y_train, S=s_init_mgpca[m], model=model_ivae, batch_size=batch_size_ivae, mi_ivae=2000)
 
         for e in range(n_epoch):
             print(f'Epoch: {e}')
@@ -500,15 +520,18 @@ def run_ivae(args, config, method="ivae"):
             
             if e % epoch_interval == 0:
                 X_train, U_train = dset_list_train[m].x, dset_list_train[m].y
+                # X_train, U_train = X_train.to(device), U_train.to(device)
                 _, _, rs_ivae_train, _ = model_ivae(X_train, U_train)
                 X_valid, U_valid = dset_list_valid[m].x, dset_list_valid[m].y
+                # X_valid, U_valid = X_valid.to(device), U_valid.to(device)
                 _, _, rs_ivae_valid, _ = model_ivae(X_valid, U_valid)
                 X_test, U_test = dset_list_test[m].x, dset_list_test[m].y
+                # X_test, U_test = X_test.to(device), U_test.to(device)
                 _, _, rs_ivae_test, _ = model_ivae(X_test, U_test)
 
-                rs_ivae_train = rs_ivae_train.detach().numpy()
-                rs_ivae_valid = rs_ivae_valid.detach().numpy()
-                rs_ivae_test = rs_ivae_test.detach().numpy()
+                rs_ivae_train = rs_ivae_train.detach().cpu().numpy()
+                rs_ivae_valid = rs_ivae_valid.detach().cpu().numpy()
+                rs_ivae_test = rs_ivae_test.detach().cpu().numpy()
                 res_recovered_source[e].append({'train': rs_ivae_train, 'valid': rs_ivae_valid, 'test': rs_ivae_test})
 
                 if experiment == 'sim':
@@ -535,6 +558,10 @@ def run_ivae(args, config, method="ivae"):
 
         model_ivae_list.append(model_ivae)
 
+    end = time.time()
+    t = (end - start) / 60
+    print(f"Total time: {t:.3f} minutes")
+
     # prepare output
     Results = {
         'loss': loss,
@@ -559,8 +586,8 @@ def run_jivae(args, config, method="jivae"):
     dataset = config.dataset
     n_layer = args.n_layer if args.n_layer else config.n_layer
     n_epoch = args.n_epoch if args.n_epoch else config.n_epoch
-    cuda = config.cuda
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    cuda = torch.cuda.is_available()
+    device = torch.device('cuda') if cuda else torch.device('cpu')
     
     # iVAE config
     latent_dim = args.n_source if args.n_source else config.latent_dim
@@ -612,7 +639,7 @@ def run_jivae(args, config, method="jivae"):
     n_sample_valid = x_valid.shape[0]
     n_sample_test = x_test.shape[0]
 
-    loader_params = {'num_workers': 4, 'pin_memory': True} if cuda else {}
+    loader_params = {'num_workers': 5, 'pin_memory': True, 'pin_memory_device': 'cuda'} if cuda else {}
 
     # create iVAE data loaders
     dset_train = ConditionalDataset(x_concat_train.astype(np.float32), y_concat_train.astype(np.float32), device)
@@ -636,12 +663,16 @@ def run_jivae(args, config, method="jivae"):
         # initialize iVAE weights with multi-view ICA initial sources from PCA and perm ICA
         fname = os.path.join(args.run, f"res_mvica_source{latent_dim}_obs{n_obs_per_seg}_seg{n_segment}_seed{seed}.p")
         if os.path.exists(fname):
-            print(f'Loading multi-view ICA weight {fname}')
+            print(f'Loading multi-view ICA weights {fname}')
             res = pickle.load(open(fname, 'rb'))
             s_init_mvica = np.vstack([res['initial_recovered_source_per_modality'][m]['train'] for m in range(n_modality)])
             model_ivae = IVAE_init_wrapper(X=x_concat_train, U=y_concat_train, S=s_init_mvica, model=model_ivae, batch_size=batch_size_ivae)
         else:
             print(f'File {fname} not found. Initialize iVAE using random weights.')
+    elif init_method == 'mgpca':
+        s_init_mgpca, _, _ = run_mgpca([x_train[:,:,m].T for m in range(n_modality)], latent_dim, 'WT')
+        print('Initializing iVAE using MGPCA weights')
+        model_ivae = IVAE_init_wrapper(X=x_concat_train, U=y_concat_train, S=np.vstack(s_init_mgpca), model=model_ivae, batch_size=batch_size_ivae, mi_ivae=2000)
 
     for e in range(n_epoch):
         print(f'Epoch: {e}')
@@ -657,15 +688,18 @@ def run_jivae(args, config, method="jivae"):
 
         if e % epoch_interval == 0:
             X_train, U_train = dset_train.x, dset_train.y
+            # X_train, U_train = X_train.to(device), U_train.to(device)
             _, _, rs_ivae_train, _ = model_ivae(X_train, U_train)
             X_valid, U_valid = dset_valid.x, dset_valid.y
+            # X_valid, U_valid = X_valid.to(device), U_valid.to(device)
             _, _, rs_ivae_valid, _ = model_ivae(X_valid, U_valid)
             X_test, U_test = dset_test.x, dset_test.y
+            # X_test, U_test = X_test.to(device), U_test.to(device)
             _, _, rs_ivae_test, _ = model_ivae(X_test, U_test)
 
-            rs_ivae_train = rs_ivae_train.detach().numpy()
-            rs_ivae_valid = rs_ivae_valid.detach().numpy()
-            rs_ivae_test = rs_ivae_test.detach().numpy()
+            rs_ivae_train = rs_ivae_train.detach().cpu().numpy()
+            rs_ivae_valid = rs_ivae_valid.detach().cpu().numpy()
+            rs_ivae_test = rs_ivae_test.detach().cpu().numpy()
 
             for m in range(n_modality):
                 res_recovered_source[e].append({'train':rs_ivae_train[m*n_sample_train:(m+1)*n_sample_train,:], \
@@ -718,8 +752,8 @@ def run_givae(args, config, method="givae"):
     dataset = config.dataset
     n_layer = args.n_layer if args.n_layer else config.n_layer
     n_epoch = args.n_epoch if args.n_epoch else config.n_epoch
-    cuda = config.cuda
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    cuda = torch.cuda.is_available()
+    device = torch.device('cuda') if cuda else torch.device('cpu')
     
     # iVAE config
     latent_dim = args.n_source if args.n_source else config.latent_dim
@@ -764,7 +798,7 @@ def run_givae(args, config, method="givae"):
     data_dim = x_concat_train.shape[1]
     aux_dim = y_train.shape[1]
 
-    loader_params = {'num_workers': 4, 'pin_memory': True} if cuda else {}
+    loader_params = {'num_workers': 5, 'pin_memory': True, 'pin_memory_device': 'cuda'} if cuda else {}
 
     # create iVAE data loaders
     dset_train = ConditionalDataset(x_concat_train.astype(np.float32), y_train.astype(np.float32), device)
@@ -788,12 +822,16 @@ def run_givae(args, config, method="givae"):
         # initialize iVAE weights with multi-view ICA initial sources from PCA and perm ICA
         fname = os.path.join(args.run, f"res_mvica_source{latent_dim}_obs{n_obs_per_seg}_seg{n_segment}_seed{seed}.p")
         if os.path.exists(fname):
-            print(f'Loading multi-view ICA weight {fname}')
+            print(f'Loading multi-view ICA weights {fname}')
             res = pickle.load(open(fname, 'rb'))
             s_init_mvica = np.mean(np.dstack([res['initial_recovered_source_per_modality'][m]['train'] for m in range(n_modality)]), axis=2)
             model_ivae = IVAE_init_wrapper(X=x_concat_train, U=y_train, S=s_init_mvica, model=model_ivae, batch_size=batch_size_ivae)
         else:
             print(f'File {fname} not found. Initialize iVAE using random weights.')
+    elif init_method == 'mgpca':
+        s_init_mgpca, _, _ = run_mgpca([x_train[:,:,m].T for m in range(n_modality)], latent_dim, 'WT')
+        print('Initializing iVAE using MGPCA weights')
+        model_ivae = IVAE_init_wrapper(X=x_concat_train, U=y_train, S=np.mean(np.dstack(s_init_mgpca), axis=2), model=model_ivae, batch_size=batch_size_ivae, mi_ivae=2000)
 
     for e in range(n_epoch):
         print(f'Epoch: {e}')
@@ -808,15 +846,18 @@ def run_givae(args, config, method="givae"):
         
         if e % epoch_interval == 0:
             X_train, U_train = dset_train.x, dset_train.y
+            # X_train, U_train = X_train.to(device), U_train.to(device)
             _, _, rs_ivae_train, _ = model_ivae(X_train, U_train)
             X_valid, U_valid = dset_valid.x, dset_valid.y
+            # X_valid, U_valid = X_valid.to(device), U_valid.to(device)
             _, _, rs_ivae_valid, _ = model_ivae(X_valid, U_valid)
             X_test, U_test = dset_test.x, dset_test.y
+            # X_test, U_test = X_test.to(device), U_test.to(device)
             _, _, rs_ivae_test, _ = model_ivae(X_test, U_test)
             
-            rs_ivae_test = rs_ivae_test.detach().numpy()
-            rs_ivae_train = rs_ivae_train.detach().numpy()
-            rs_ivae_valid = rs_ivae_valid.detach().numpy()
+            rs_ivae_test = rs_ivae_test.detach().cpu().numpy()
+            rs_ivae_train = rs_ivae_train.detach().cpu().numpy()
+            rs_ivae_valid = rs_ivae_valid.detach().cpu().numpy()
             for m in range(n_modality):
                 res_recovered_source[e].append({'test':rs_ivae_test, 'train':rs_ivae_train, 'valid':rs_ivae_valid})
 
@@ -867,8 +908,8 @@ def run_deepmisa(args, config, method="misa"):
     dataset = config.dataset
     n_layer = args.n_layer if args.n_layer else config.n_layer
     n_epoch = args.n_epoch if args.n_epoch else config.n_epoch
-    cuda = config.cuda
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    cuda = torch.cuda.is_available()
+    device = torch.device('cuda') if cuda else torch.device('cpu')
     
     # iVAE config
     latent_dim = args.n_source if args.n_source else config.latent_dim
@@ -957,13 +998,17 @@ def run_deepmisa(args, config, method="misa"):
         elif init_method == 'mvica':
             fname = os.path.join(args.run, f"res_mvica_source{latent_dim}_obs{n_obs_per_seg}_seg{n_segment}_seed{seed}.p")
             if os.path.exists(fname):
-                print(f'Loading multi-view ICA weight {fname}')
+                print(f'Loading multi-view ICA weights {fname}')
                 res = pickle.load(open(fname, 'rb'))
                 weight_init = res['weight_init']['train'][m,:,:]
                 weight_init_list.append(weight_init)
             else:
                 print(f'File {fname} not found. Initialize MISA using random weights.')
-    
+        # initialize MISA model weights using MGPCA final weights
+        elif init_method == 'mgpca':
+            print('Initializing MISA using MGPCA weights')
+            s_init_mgpca, weight_init_list, _ = run_mgpca([x_train[:,:,m].T for m in range(n_modality)], latent_dim, 'WT')
+            
     model_misa = MISA(weights=weight_init_list,
         index=index, 
         subspace=subspace, 
@@ -982,7 +1027,7 @@ def run_deepmisa(args, config, method="misa"):
     segment_shuffled = np.arange(n_segment)
     np.random.shuffle(segment_shuffled)
 
-    loader_params = {'num_workers': 4, 'pin_memory': True} if cuda else {}
+    loader_params = {'num_workers': 5, 'pin_memory': True, 'pin_memory_device': 'cuda'} if cuda else {}
 
     sdl_list_train, sdl_list_valid, sdl_list_test = [], [], []
 
@@ -1030,29 +1075,32 @@ def run_deepmisa(args, config, method="misa"):
         # loop MISA through segments
         # remove the mean of segment because MISA loss assumes zero mean
         # randomize segment order
-        for seg in segment_shuffled:
+        for ind_seg, seg in enumerate(segment_shuffled):
+            if ind_seg == 0:
+                scale_control = True
+            else:
+                scale_control = False
             model_misa, [rs_misa_train, rs_misa_valid], [loss['train'][e,seg], loss['valid'][e,seg]], res_misa_dict = \
-                MISA_wrapper_(data_loader=sdl_list_train[seg],
-                              test_data_loader=sdl_list_valid[seg],
-                              epochs=mi_misa, lr=lr_misa, device=device,
-                              ckpt_file=ckpt_file, model_MISA=model_misa)
+                MISA_wrapper_(data_loader=sdl_list_train[seg], test_data_loader=sdl_list_valid[seg],
+                              epochs=mi_misa, lr=lr_misa, device=device, ckpt_file=ckpt_file, 
+                              model_MISA=model_misa, scale_control=scale_control)
 
             _, rs_misa_test, loss['test'][e,seg], _ = \
-                MISA_wrapper_(test=True, data_loader=sdl_list_test[seg], device=device, 
-                              ckpt_file=ckpt_file, model_MISA=model_misa)
+                MISA_wrapper_(test=True, data_loader=sdl_list_test[seg], device=device, ckpt_file=ckpt_file, 
+                              model_MISA=model_misa, scale_control=scale_control)
             
             for m in range(n_modality):
                 if experiment == "sim":
-                    res_rs_misa_train[seg*n_obs_per_seg:(seg+1)*n_obs_per_seg,:,m] = rs_misa_train[m].detach().numpy()
-                    res_rs_misa_valid[seg*n_obs_per_seg:(seg+1)*n_obs_per_seg,:,m] = rs_misa_valid[m].detach().numpy()
-                    res_rs_misa_test[seg*n_obs_per_seg:(seg+1)*n_obs_per_seg,:,m] = rs_misa_test[m].detach().numpy()
+                    res_rs_misa_train[seg*n_obs_per_seg:(seg+1)*n_obs_per_seg,:,m] = rs_misa_train[m].detach().cpu().numpy()
+                    res_rs_misa_valid[seg*n_obs_per_seg:(seg+1)*n_obs_per_seg,:,m] = rs_misa_valid[m].detach().cpu().numpy()
+                    res_rs_misa_test[seg*n_obs_per_seg:(seg+1)*n_obs_per_seg,:,m] = rs_misa_test[m].detach().cpu().numpy()
                 elif experiment == "img":
                     ind_train = np.where(u_train[:,seg]==1)[0]
                     ind_valid = np.where(u_valid[:,seg]==1)[0]
                     ind_test = np.where(u_test[:,seg]==1)[0]
-                    res_rs_misa_train[ind_train,:,m] = rs_misa_train[m].detach().numpy()
-                    res_rs_misa_valid[ind_valid,:,m] = rs_misa_valid[m].detach().numpy()
-                    res_rs_misa_test[ind_test,:,m] = rs_misa_test[m].detach().numpy()
+                    res_rs_misa_train[ind_train,:,m] = rs_misa_train[m].detach().cpu().numpy()
+                    res_rs_misa_valid[ind_valid,:,m] = rs_misa_valid[m].detach().cpu().numpy()
+                    res_rs_misa_test[ind_test,:,m] = rs_misa_test[m].detach().cpu().numpy()
         
         if e % epoch_interval == 0:
             for m in range(n_modality):
@@ -1101,8 +1149,8 @@ def run_icebeem(args, config, method="icebeem"):
     data_path = args.data_path
     n_modality = config.n_modality
     experiment = config.experiment
-    cuda = config.cuda
-    device = config.device
+    cuda = torch.cuda.is_available()
+    device = torch.device('cuda') if cuda else torch.device('cpu')
     dataset = config.dataset
     n_layer = args.n_layer if args.n_layer else config.n_layer
     n_epoch = args.n_epoch if args.n_epoch else config.n_epoch
@@ -1149,7 +1197,7 @@ def run_icebeem(args, config, method="icebeem"):
         # initialize iVAE weights with multi-view ICA initial sources from PCA and perm ICA
         fname = os.path.join(args.run, f"res_mvica_source{latent_dim}_obs{n_obs_per_seg}_seg{n_segment}_seed{seed}.p")
         if os.path.exists(fname):
-            print(f'Loading multi-view ICA weight {fname}')
+            print(f'Loading multi-view ICA weights {fname}')
             res = pickle.load(open(fname, 'rb'))
             s_init_mvica = res['initial_recovered_source_per_modality'][m]['train']
         else:

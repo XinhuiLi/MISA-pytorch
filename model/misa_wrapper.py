@@ -3,13 +3,17 @@ import torch
 import numpy as np
 from model.MISAK import MISA
 
-def MISA_wrapper_(data_loader, epochs=10, lr=0.01, A=None, device='cpu', ckpt_file='misa.pt', test=False, test_data_loader=None, model_MISA=None):
+def MISA_wrapper_(data_loader, epochs=10, lr=0.01, A=None, device='cpu', ckpt_file='misa.pt', test=False, test_data_loader=None, model_MISA=None, scale_control=True):
     
     model_MISA.to(device=device)
     res_dict = {}
     
     if not test:
-        training_loss, training_MISI, optimizer = model_MISA.train_me(data_loader, epochs, lr, A)
+        training_loss, training_MISI, optimizer = model_MISA.train_me(train_data=data_loader, 
+                                                                      n_iter=epochs, 
+                                                                      learning_rate=lr, 
+                                                                      A=A, 
+                                                                      scale_control=scale_control)
         training_loss_avg = np.mean([batch.detach().cpu().numpy() for batch in training_loss[-1]])
         # print('MISA \tloss: {}'.format(training_loss_avg))
         training_output = model_MISA.output
@@ -43,7 +47,7 @@ def MISA_wrapper_(data_loader, epochs=10, lr=0.01, A=None, device='cpu', ckpt_fi
             # wandb.log({'MISA training loss': loss_MISA})
         torch.save(res_dict, ckpt_file)
     else:
-        checkpoint = torch.load(ckpt_file)
+        checkpoint = torch.load(ckpt_file, weights_only=False)
         model_MISA.load_state_dict(checkpoint['model_MISA'])
         test_loss = model_MISA.predict(data_loader)
         loss_MISA = np.mean(test_loss)
@@ -79,7 +83,8 @@ def MISA_wrapper(data_loader, index, subspace, eta, beta, lam, input_dim, output
             final_MISI = training_MISI[-1]
         
         test_loss = model_MISA.predict(test_data_loader)
-        print(f"test loss: {test_loss[0].detach().cpu().numpy():.3f}")
+        # print(f"test loss: {test_loss[0].detach().cpu().numpy():.3f}")
+        print(f"test loss: {test_loss[0]:.3f}")
 
         torch.save({'model_MISA': model_MISA.state_dict(),
                 'optimizer': optimizer.state_dict(),
@@ -99,6 +104,7 @@ def MISA_wrapper(data_loader, index, subspace, eta, beta, lam, input_dim, output
         checkpoint = torch.load(ckpt_file)
         model_MISA.load_state_dict(checkpoint['model_MISA'])
         test_loss = model_MISA.predict(test_data_loader)
-        print(f"test loss: {test_loss[0].detach().cpu().numpy():.3f}")
+        # print(f"test loss: {test_loss[0].detach().cpu().numpy():.3f}")
+        print(f"test loss: {test_loss[0]:.3f}")
     
     return model_MISA, final_MISI

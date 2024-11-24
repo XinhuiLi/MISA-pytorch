@@ -6,7 +6,7 @@ import torch
 import numpy as np
 import yaml
 from runners.misa_runner import run_misa
-from runners.deepmisa_runner import run_diva, run_ivae, run_jivae, run_givae, run_deepmisa, run_icebeem, run_mvica
+from runners.deepmisa_runner import run_deepiva, run_ivae, run_jivae, run_givae, run_deepmisa, run_icebeem, run_mvica
 
 def parse_sim():
     
@@ -74,7 +74,7 @@ if __name__ == '__main__':
         new_config.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         
         if args.method.lower() == 'diva':
-            r = run_diva(args, new_config)
+            r = run_deepiva(args, new_config)
         elif args.method.lower() == 'ivae':
             r = run_ivae(args, new_config)
         elif args.method.lower() == 'jivae':
@@ -108,7 +108,7 @@ if __name__ == '__main__':
         elif args.method.lower() == 'icebeem':
             fname = os.path.join(args.run, f'res_{args.method.lower()}_layer{args.n_layer}_source{args.n_source}_obs{args.n_obs_per_seg}_seg{args.n_segment}_epoch{args.n_epoch}_layerflow{new_config.icebeem.n_layer_flow}_lrebm{new_config.icebeem.lr_ebm}_lrflow{new_config.icebeem.lr_flow}_seed{args.seed}.p')
         elif args.method.lower() == 'mvica':
-            fname = os.path.join(args.run, f'res_{args.method.lower()}_layer{args.n_layer}_source{args.n_source}_obs{args.n_obs_per_seg}_seg{args.n_segment}_seed{args.seed}.p')
+            fname = os.path.join(args.run, f'res_{args.method.lower()}_source{args.n_source}_obs{args.n_obs_per_seg}_seg{args.n_segment}_seed{args.seed}.p')
         else:
             fname = os.path.join(args.run, 'res_' + args.filename.split('.')[0] + '_' + args.weights + '.p')
 

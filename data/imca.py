@@ -16,7 +16,7 @@ class ConditionalDataset(Dataset):
     def __init__(self, X, Y, device='cpu', S=None, latent_dim=None):
         self.device = device
         self.x = torch.from_numpy(X).to(device)
-        self.y = torch.from_numpy(Y).to(device)  # if discrete, then this should be one_hot
+        self.y = torch.from_numpy(Y).to(device) # if discrete, then this should be one_hot
         self.s = torch.from_numpy(S).to(device) if S is not None else None
         self.len = self.x.shape[0]
         self.aux_dim = self.y.shape[1]
@@ -168,7 +168,6 @@ def generateUniformMat_minMax(Ncomp, condT, minVal=.5, maxVal=1.5):
 def gen_nonstationary_data(Ncomp, Nlayer, Nsegment, NsegmentObs, source='Laplace', NonLin='leaky', negSlope=.2,
                            Niter4condThresh=1e4, seed=1):
     """
-
     generate multivariate data based on the non-stationary non-linear ICA model of Hyvarinen & Morioka (2016)
 
     INPUT
@@ -186,8 +185,6 @@ def gen_nonstationary_data(Ncomp, Nlayer, Nsegment, NsegmentObs, source='Laplace
           - sources: original non-stationary source
           - obs: mixed sources
           - labels: segment labels (indicating the non stationarity in the data)
-
-
     """
     np.random.seed(seed)
     # check input is correct

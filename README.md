@@ -13,7 +13,7 @@ git clone https://github.com/trendscenter/MISA-pytorch.git
 2. Create a virtual environment and activate the environment
 
 ```
-conda create --name misa python=3.10
+conda create --name misa python=3.12
 conda activate misa
 ```
 

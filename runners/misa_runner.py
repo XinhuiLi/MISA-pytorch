@@ -71,14 +71,14 @@ def run_misa(args, config):
     else:
         pass # TO DO: should error...
 
-    if 'eta' in config:
-        eta = config.eta
+    if 'eta' in config.misa:
+        eta = config.misa.eta
     
-    if 'beta' in config:
-        beta = config.beta
+    if 'beta' in config.misa:
+        beta = config.misa.beta
 
-    if 'lam' in config:
-        lam = config.lam
+    if 'lam' in config.misa:
+        lam = config.misa.lam
 
     if config.misa.n_run != []:
         n_run = config.misa.n_run
@@ -147,7 +147,7 @@ def run_misa(args, config):
         index = slice(0, num_modal)
         
         input_dim = [torch.tensor(dd.shape[-1],device=device) for dd in ds.mat_data]
-        if config.output_dim != []:
+        if config.misa.output_dim != []:
             output_dim = [torch.tensor(dd,device=device) for dd in output_dim]
         else:
             output_dim = input_dim

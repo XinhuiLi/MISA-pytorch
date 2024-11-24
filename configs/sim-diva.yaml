@@ -2,7 +2,6 @@ dataset: "diva"
 subspace: "iva"
 method: "diva"
 experiment: "sim"
-cuda: True
 
 n_epoch: 200
 
@@ -15,7 +14,7 @@ n_obs_per_seg: 200
 data_seed: 1
 
 # model
-init_method: "mvica" # "ivae" or "mvica"
+init_method: "mgpca" # "ivae"/"mvica"/"mgpca"/others(random initialization)
 
 misa:
   eta: [1]
